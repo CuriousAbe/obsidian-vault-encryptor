@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2
+
+- Add self-describing encrypted header format (v2) for better long-term recovery.
+- Keep backward compatibility for decrypting older v1 `.enc` files.
+- Keep command palette label consistent in English to avoid mixed-language display.
+
 ## 1.1
 
 - Open decrypted file immediately after right-click decrypt.
