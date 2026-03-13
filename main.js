@@ -22,12 +22,7 @@ class VaultEncryptorPlugin extends Plugin {
 
     this.registerView(
       VIEW_TYPE_ENCRYPTED,
-      (leaf) =>
-        new EncryptedFileView(
-          leaf,
-          () => this.t("encryptedViewTitle"),
-          () => this.t("encryptedViewDescription")
-        )
+      (leaf) => new EncryptedFileView(leaf, this)
     );
     this.registerExtensions(["enc"], VIEW_TYPE_ENCRYPTED);
 
@@ -72,7 +67,7 @@ class VaultEncryptorPlugin extends Plugin {
             .setTitle(this.t("menuDecryptFile"))
             .setIcon("unlock")
             .onClick(() => {
-              void this.runForTargets("decrypt", [file.path], this.t("labelDecryptFile"));
+              void this.decryptSingleAndOpen(file.path);
             });
         });
       } else {
@@ -190,6 +185,50 @@ class VaultEncryptorPlugin extends Plugin {
     }
   }
 
+  async decryptSingleAndOpen(encPath, passphrase, options = {}) {
+    const provided = typeof passphrase === "string" ? passphrase : null;
+    const resolvedPassphrase = provided ?? (await this.getPassphrase(false));
+    if (!resolvedPassphrase) {
+      return { ok: false, cancelled: true, reason: this.t("noticeDecryptCanceled") };
+    }
+
+    const result = await this.decryptFile(encPath, resolvedPassphrase);
+    if (!result.ok) {
+      if (options.showFailureNotice !== false) {
+        new Notice(this.t("noticeDecryptFailed", { reason: result.reason }));
+      }
+      return result;
+    }
+
+    const openResult = await this.openDecryptedFile(encPath);
+    if (!openResult.ok) {
+      if (options.showFailureNotice !== false) {
+        new Notice(openResult.reason);
+      }
+      return openResult;
+    }
+
+    if (options.showSuccessNotice !== false) {
+      new Notice(this.t("noticeDecryptedOpened", { path: openResult.path }));
+    }
+    return { ok: true, path: openResult.path };
+  }
+
+  async openDecryptedFile(encPath) {
+    const plainPath = encPath.endsWith(".enc") ? encPath.slice(0, -4) : encPath;
+    const plainEntry = this.app.vault.getAbstractFileByPath(plainPath);
+    if (!(plainEntry instanceof TFile)) {
+      return {
+        ok: false,
+        reason: this.t("noticeOpenDecryptedMissing", { path: plainPath }),
+      };
+    }
+
+    const leaf = this.app.workspace.getLeaf(false) || this.app.workspace.getLeaf(true);
+    await leaf.openFile(plainEntry, { active: true });
+    return { ok: true, path: plainPath };
+  }
+
   async getPassphrase(confirmIfEncrypt) {
     const first = await openPassphraseModal(this.app, {
       title: this.t("promptEnterPassphrase"),
@@ -302,10 +341,9 @@ class VaultEncryptorSettingTab extends PluginSettingTab {
 }
 
 class EncryptedFileView extends ItemView {
-  constructor(leaf, getTitle, getDescription) {
+  constructor(leaf, plugin) {
     super(leaf);
-    this.getTitleText = getTitle;
-    this.getDescriptionText = getDescription;
+    this.plugin = plugin;
   }
 
   getViewType() {
@@ -313,15 +351,81 @@ class EncryptedFileView extends ItemView {
   }
 
   getDisplayText() {
-    return this.getTitleText();
+    return this.plugin.t("encryptedViewTitle");
   }
 
   async onOpen() {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.addClass("vault-encryptor-block-view");
-    containerEl.createEl("h3", { text: this.getTitleText() });
-    containerEl.createEl("p", { text: this.getDescriptionText() });
+    containerEl.createEl("h3", { text: this.plugin.t("encryptedViewTitle") });
+    containerEl.createEl("p", { text: this.plugin.t("encryptedViewDescription") });
+
+    const currentFile = this.file;
+    if (!(currentFile instanceof TFile) || !currentFile.path.endsWith(".enc")) {
+      return;
+    }
+
+    const form = containerEl.createDiv({ cls: "vault-encryptor-inline-form" });
+    const input = form.createEl("input", {
+      type: "password",
+      placeholder: this.plugin.t("inlinePassphrasePlaceholder"),
+    });
+    input.addClass("vault-encryptor-inline-input");
+
+    const button = form.createEl("button", {
+      text: this.plugin.t("inlineDecryptOpenButton"),
+      cls: "mod-cta",
+    });
+
+    const statusEl = containerEl.createEl("p", {
+      cls: "vault-encryptor-inline-status",
+      text: this.plugin.t("inlineHint"),
+    });
+
+    const setStatus = (text, isError) => {
+      statusEl.setText(text || "");
+      statusEl.toggleClass("is-error", Boolean(isError));
+    };
+
+    const onSubmit = async () => {
+      const passphrase = input.value;
+      if (!passphrase) {
+        setStatus(this.plugin.t("noticePassphraseEmpty"), true);
+        return;
+      }
+
+      input.disabled = true;
+      button.disabled = true;
+      setStatus(this.plugin.t("inlineDecrypting"), false);
+
+      const result = await this.plugin.decryptSingleAndOpen(currentFile.path, passphrase, {
+        showSuccessNotice: false,
+        showFailureNotice: false,
+      });
+
+      if (!result.ok) {
+        setStatus(result.reason || this.plugin.t("inlineDecryptFailedUnknown"), true);
+        input.disabled = false;
+        button.disabled = false;
+        input.focus();
+        return;
+      }
+
+      setStatus(this.plugin.t("inlineDecryptedOpened"), false);
+    };
+
+    button.onclick = () => {
+      void onSubmit();
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void onSubmit();
+      }
+    });
+
+    window.setTimeout(() => input.focus(), 10);
   }
 }
 
@@ -680,6 +784,10 @@ const I18N = {
     noticeProtectedPath: "Refusing to process files in .obsidian.",
     noticeAlreadyEncrypted: "Active file is already encrypted (.enc).",
     noticeEncrypted: "Encrypted: {path}",
+    noticeDecryptFailed: "Decrypt failed: {reason}",
+    noticeDecryptCanceled: "Decrypt canceled.",
+    noticeDecryptedOpened: "Decrypted and opened: {path}",
+    noticeOpenDecryptedMissing: "Decrypted file not found after decrypt: {path}",
     noticeEncryptFailed: "Encrypt failed: {reason}",
     noticeTargetInvalid: "Some targets are invalid. Check console for details.",
     noticeNoFiles: "No files to {mode}.",
@@ -703,16 +811,23 @@ const I18N = {
     encryptedViewTitle: "Encrypted file",
     encryptedViewDescription:
       "This file is encrypted and cannot be edited directly. Right-click the file and choose 'Decrypt this file'.",
+    inlinePassphrasePlaceholder: "Enter passphrase to decrypt",
+    inlineDecryptOpenButton: "Decrypt and open",
+    inlineHint: "You can decrypt this file directly here.",
+    inlineNoFileContext: "Cannot determine encrypted file path in current view.",
+    inlineDecrypting: "Decrypting...",
+    inlineDecryptedOpened: "Decrypted. Opening file...",
+    inlineDecryptFailedUnknown: "Decrypt failed.",
     reasonOutputExists: "Output already exists ({path}). Resolve filename conflict manually.",
     wordEncrypt: "encrypt",
     wordDecrypt: "decrypt",
   },
   zh: {
     commandEncryptCurrent: "加密当前文件",
-    menuEncryptFile: "Vault Encryptor：加密此文件",
-    menuDecryptFile: "Vault Encryptor：解密此文件",
-    menuEncryptFolder: "Vault Encryptor：加密文件夹",
-    menuDecryptFolder: "Vault Encryptor：解密文件夹",
+    menuEncryptFile: "加密此文件",
+    menuDecryptFile: "解密此文件",
+    menuEncryptFolder: "加密文件夹",
+    menuDecryptFolder: "解密文件夹",
     labelEncryptFile: "加密文件",
     labelDecryptFile: "解密文件",
     labelEncryptFolder: "加密文件夹",
@@ -721,20 +836,24 @@ const I18N = {
     noticeProtectedPath: "拒绝处理 .obsidian 目录中的文件。",
     noticeAlreadyEncrypted: "当前文件已是加密文件（.enc）。",
     noticeEncrypted: "已加密：{path}",
+    noticeDecryptFailed: "解密失败：{reason}",
+    noticeDecryptCanceled: "已取消解密。",
+    noticeDecryptedOpened: "已解密并打开：{path}",
+    noticeOpenDecryptedMissing: "解密后未找到文件：{path}",
     noticeEncryptFailed: "加密失败：{reason}",
     noticeTargetInvalid: "部分目标路径无效，请查看控制台详情。",
     noticeNoFiles: "没有可{mode}的文件。",
     noticeFinished: "{label}：{mode}完成。成功 {success}，跳过 {skipped}，失败 {failed}。",
     noticePassphraseMismatch: "两次输入的密码不一致。",
     noticePassphraseEmpty: "密码不能为空。",
-    promptEnterPassphrase: "Vault Encryptor：输入密码",
-    promptConfirmPassphrase: "Vault Encryptor：确认密码",
+    promptEnterPassphrase: "输入密码",
+    promptConfirmPassphrase: "确认密码",
     promptPassphrase: "密码",
     promptPassphraseAgain: "再次输入密码",
     promptContinue: "继续",
     promptConfirm: "确认",
     promptCancel: "取消",
-    settingTitle: "Vault Encryptor",
+    settingTitle: "文件加密器",
     settingManualModeName: "手动模式",
     settingManualModeDesc:
       "通过文件树右键菜单手动加密/解密文件和文件夹。.enc 文件在 Obsidian 中为只读提示视图。",
@@ -744,6 +863,13 @@ const I18N = {
     encryptedViewTitle: "加密文件",
     encryptedViewDescription:
       "此文件已加密，不能直接编辑。请在文件树中右键该文件并选择“解密此文件”。",
+    inlinePassphrasePlaceholder: "输入密码后解密",
+    inlineDecryptOpenButton: "解密并打开",
+    inlineHint: "你可以在这里直接输入密码并解密。",
+    inlineNoFileContext: "当前视图无法确定加密文件路径。",
+    inlineDecrypting: "正在解密...",
+    inlineDecryptedOpened: "解密成功，正在打开文件...",
+    inlineDecryptFailedUnknown: "解密失败。",
     reasonOutputExists: "输出文件已存在（{path}），请手动处理重名冲突。",
     wordEncrypt: "加密",
     wordDecrypt: "解密",

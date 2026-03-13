@@ -16,3 +16,21 @@
   max-width: 40rem;
   opacity: 0.85;
 }
+
+.vault-encryptor-inline-form {
+  display: flex;
+  gap: 0.5rem;
+  width: min(100%, 34rem);
+}
+
+.vault-encryptor-inline-input {
+  flex: 1;
+}
+
+.vault-encryptor-inline-status {
+  font-size: 0.92em;
+}
+
+.vault-encryptor-inline-status.is-error {
+  color: var(--text-error);
+}
