@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.1
+
+- Rename plugin id from `obsidian-vault-encryptor` to `vault-encryptor` to satisfy Community Plugins naming rules.
+- Keep functionality unchanged; this release is metadata-only for marketplace submission.
+
 ## 1.2
 
 - Add self-describing encrypted header format (v2) for better long-term recovery.
