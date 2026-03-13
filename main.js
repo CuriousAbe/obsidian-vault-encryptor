@@ -10,8 +10,11 @@ const {
   normalizePath,
 } = require("obsidian");
 
-const MAGIC_BYTES = new Uint8Array([79, 67, 69, 78, 67, 49]);
-const VERSION = 1;
+const MAGIC_V1_BYTES = new Uint8Array([79, 67, 69, 78, 67, 49]);
+const MAGIC_V2_BYTES = new Uint8Array([79, 67, 69, 78, 74, 50]);
+const VERSION_V1 = 1;
+const VERSION_V2 = 2;
+const FORMAT_ID = "openclaw-vault-encryptor";
 const PBKDF2_ITERATIONS = 210000;
 const VIEW_TYPE_ENCRYPTED = "vault-encryptor-encrypted-view";
 
@@ -591,7 +594,7 @@ async function encryptBytes(webCrypto, passphrase, plainBytes, iterations) {
   const encrypted = new Uint8Array(
     await webCrypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plainBytes)
   );
-  return packEncryptedPayload({ salt, iv, iterations, encrypted });
+  return packEncryptedPayloadV2({ salt, iv, iterations, encrypted });
 }
 
 async function decryptBytes(webCrypto, passphrase, encryptedPayload) {
@@ -626,19 +629,51 @@ async function deriveAesKey(webCrypto, passphrase, salt, iterations) {
   );
 }
 
-function packEncryptedPayload(payload) {
+function packEncryptedPayloadV2(payload) {
+  const headerObject = {
+    format: FORMAT_ID,
+    version: VERSION_V2,
+    cipher: "AES-256-GCM",
+    kdf: "PBKDF2-SHA256",
+    iterations: payload.iterations,
+    salt: bytesToBase64(payload.salt),
+    iv: bytesToBase64(payload.iv),
+    ciphertextLength: payload.encrypted.length,
+    passphraseEncoding: "utf-8",
+  };
+
+  const headerBytes = new TextEncoder().encode(JSON.stringify(headerObject));
+  const out = new Uint8Array(
+    MAGIC_V2_BYTES.length + 4 + headerBytes.length + payload.encrypted.length
+  );
+
+  let offset = 0;
+  out.set(MAGIC_V2_BYTES, offset);
+  offset += MAGIC_V2_BYTES.length;
+
+  writeUint32(out, offset, headerBytes.length);
+  offset += 4;
+
+  out.set(headerBytes, offset);
+  offset += headerBytes.length;
+
+  out.set(payload.encrypted, offset);
+  return out;
+}
+
+function packEncryptedPayloadV1(payload) {
   const saltLen = payload.salt.length;
   const ivLen = payload.iv.length;
   const encLen = payload.encrypted.length;
 
-  const headerLen = MAGIC_BYTES.length + 1 + 2 + 2 + 4 + 4;
+  const headerLen = MAGIC_V1_BYTES.length + 1 + 2 + 2 + 4 + 4;
   const out = new Uint8Array(headerLen + saltLen + ivLen + encLen);
 
   let offset = 0;
-  out.set(MAGIC_BYTES, offset);
-  offset += MAGIC_BYTES.length;
+  out.set(MAGIC_V1_BYTES, offset);
+  offset += MAGIC_V1_BYTES.length;
 
-  out[offset] = VERSION;
+  out[offset] = VERSION_V1;
   offset += 1;
 
   writeUint16(out, offset, saltLen);
@@ -665,21 +700,79 @@ function packEncryptedPayload(payload) {
 }
 
 function unpackEncryptedPayload(data) {
-  if (data.length < MAGIC_BYTES.length + 1 + 2 + 2 + 4 + 4) {
+  if (startsWithBytes(data, MAGIC_V2_BYTES)) {
+    return unpackEncryptedPayloadV2(data);
+  }
+  if (startsWithBytes(data, MAGIC_V1_BYTES)) {
+    return unpackEncryptedPayloadV1(data);
+  }
+  throw new Error("Invalid encrypted file header.");
+}
+
+function unpackEncryptedPayloadV2(data) {
+  if (data.length < MAGIC_V2_BYTES.length + 4) {
+    throw new Error("Encrypted file is too short.");
+  }
+
+  let offset = MAGIC_V2_BYTES.length;
+  const headerLen = readUint32(data, offset);
+  offset += 4;
+
+  if (headerLen <= 0 || offset + headerLen > data.length) {
+    throw new Error("Encrypted header length is invalid.");
+  }
+
+  let header;
+  try {
+    const headerText = new TextDecoder().decode(data.slice(offset, offset + headerLen));
+    header = JSON.parse(headerText);
+  } catch (_error) {
+    throw new Error("Encrypted header JSON is invalid.");
+  }
+  offset += headerLen;
+
+  if (header.version !== VERSION_V2 || header.format !== FORMAT_ID) {
+    throw new Error("Unsupported encrypted format metadata.");
+  }
+
+  const iterations = Number.parseInt(String(header.iterations), 10);
+  if (!Number.isFinite(iterations) || iterations <= 0) {
+    throw new Error("Invalid PBKDF2 iterations in encrypted header.");
+  }
+
+  const salt = base64ToBytes(header.salt);
+  const iv = base64ToBytes(header.iv);
+  if (salt.length === 0 || iv.length === 0) {
+    throw new Error("Encrypted header is missing salt/iv.");
+  }
+
+  const encrypted = data.slice(offset);
+  const expectedCipherLen = Number.parseInt(String(header.ciphertextLength), 10);
+  if (Number.isFinite(expectedCipherLen) && expectedCipherLen > 0) {
+    if (encrypted.length !== expectedCipherLen) {
+      throw new Error("Encrypted payload length mismatch.");
+    }
+  }
+
+  return { salt, iv, iterations, encrypted };
+}
+
+function unpackEncryptedPayloadV1(data) {
+  if (data.length < MAGIC_V1_BYTES.length + 1 + 2 + 2 + 4 + 4) {
     throw new Error("Encrypted file is too short.");
   }
 
   let offset = 0;
-  for (let i = 0; i < MAGIC_BYTES.length; i += 1) {
-    if (data[offset + i] !== MAGIC_BYTES[i]) {
+  for (let i = 0; i < MAGIC_V1_BYTES.length; i += 1) {
+    if (data[offset + i] !== MAGIC_V1_BYTES[i]) {
       throw new Error("Invalid encrypted file header.");
     }
   }
-  offset += MAGIC_BYTES.length;
+  offset += MAGIC_V1_BYTES.length;
 
   const version = data[offset];
   offset += 1;
-  if (version !== VERSION) {
+  if (version !== VERSION_V1) {
     throw new Error(`Unsupported encrypted format version: ${version}`);
   }
 
@@ -704,6 +797,54 @@ function unpackEncryptedPayload(data) {
   const encrypted = data.slice(offset, offset + encLen);
 
   return { salt, iv, iterations, encrypted };
+}
+
+function startsWithBytes(source, prefix) {
+  if (source.length < prefix.length) {
+    return false;
+  }
+  for (let i = 0; i < prefix.length; i += 1) {
+    if (source[i] !== prefix[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function bytesToBase64(bytes) {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes).toString("base64");
+  }
+  if (typeof btoa === "function") {
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 1) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+  throw new Error("No base64 encoder available.");
+}
+
+function base64ToBytes(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error("Encrypted header base64 value is missing.");
+  }
+
+  if (typeof Buffer !== "undefined") {
+    const buf = Buffer.from(value, "base64");
+    return new Uint8Array(buf);
+  }
+
+  if (typeof atob === "function") {
+    const binary = atob(value);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      out[i] = binary.charCodeAt(i);
+    }
+    return out;
+  }
+
+  throw new Error("No base64 decoder available.");
 }
 
 function randomBytes(webCrypto, length) {
@@ -823,7 +964,7 @@ const I18N = {
     wordDecrypt: "decrypt",
   },
   zh: {
-    commandEncryptCurrent: "加密当前文件",
+    commandEncryptCurrent: "Encrypt current file",
     menuEncryptFile: "加密此文件",
     menuDecryptFile: "解密此文件",
     menuEncryptFolder: "加密文件夹",
