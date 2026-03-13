@@ -1,0 +1,18 @@
+.vault-encryptor-block-view {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 2rem 1.25rem;
+}
+
+.vault-encryptor-block-view h3 {
+  margin: 0;
+}
+
+.vault-encryptor-block-view p {
+  margin: 0;
+  max-width: 40rem;
+  opacity: 0.85;
+}

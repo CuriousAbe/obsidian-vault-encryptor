@@ -1,0 +1,9 @@
+{
+  "id": "obsidian-vault-encryptor",
+  "name": "Vault Encryptor",
+  "version": "1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Manual right-click encryption/decryption for files and folders with blocked .enc editing.",
+  "author": "openabe",
+  "isDesktopOnly": false
+}
